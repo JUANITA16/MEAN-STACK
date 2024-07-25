@@ -1,0 +1,55 @@
+trigger:
+  branches:
+    include:
+    - development
+    - qc
+    - release
+    - master
+  paths:
+    include:
+    - '*'
+    exclude:
+    - '**azure-pipelines.yml'
+
+resources:
+  repositories:
+  - repository: Template
+    type: git
+    name: devops-templates
+    ref: master
+
+variables:
+  - name: stage
+    ${{ if eq(variables['Build.SourceBranchName'], 'development') }}:
+      value: dev
+    ${{ if eq(variables['Build.SourceBranchName'], 'qc') }}:
+      value: qc
+    ${{ elseif eq(variables['Build.SourceBranchName'], 'release') }}:
+      value: uat
+    ${{ elseif eq(variables['Build.SourceBranchName'], 'master') }}:
+      value: pdn
+  - name: region
+    value: us-east-1
+
+  - name: aws_credentials
+    value: MINMAMBU-${{ upper(variables.stage) }}
+    #Variables de grupo del proyecto
+  - group: pasivos-procesos-minmambu-backend-${{ variables.stage }}
+  - group: pasivos-procesos-minmambu-backend-release
+
+  - name: envPath
+    value: '$(System.DefaultWorkingDirectory)/.env'
+  - name: serverlessPath
+    value: '$(System.DefaultWorkingDirectory)'
+  - name: serverlessVersion
+    value: '3'
+  - name: plugginsToInstall
+    value: 'serverless-python-requirements serverless-wsgi'
+
+stages:
+- template: lambda-deploy/python-deploy/main.yml@Template
+  parameters:
+    envPath: ${{variables.envPath}}
+    serverlessPath: ${{variables.serverlessPath}}
+    serverlessVersion: ${{variables.serverlessVersion}}
+    plugginsToInstall: ${{variables.plugginsToInstall}}

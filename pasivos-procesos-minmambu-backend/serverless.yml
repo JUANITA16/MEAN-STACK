@@ -1,0 +1,600 @@
+service: ${self:custom.projectFullName}
+frameworkVersion: '3'
+useDotenv: true
+
+provider:
+  name: aws
+  stage: ${self:custom.stage}
+  runtime: python3.9
+  versionFunctions: false
+  lambdaHashingVersion: 20201221
+  deploymentBucket:
+    name: ${self:custom.deploymentBucketName}
+    maxPreviousDeploymentArtifacts: 10
+  apiGateway:
+    restApiId: ${env:ApiId,cf:${self:custom.integrationBaseStackName}.ApiId}
+    restApiRootResourceId: ${env:RootResourceId,cf:${self:custom.integrationBaseStackName}.RootResourceId} 
+  stackTags:
+    Ambiente: ${self:custom.stage}
+    Disponibilidad: LU-DO-24:00
+    Celula: Activos y Pasivos
+    Despliegue: ServerlessFramework
+    Aplicativo: Minmambu
+    Compania: Banco
+    Area: OPERATIONS
+    Producto: Cuenta Corriente
+
+custom:
+  stage: ${opt:stage, "dev"}
+  project: ${env:project}
+  integrationName: ${env:integrationName}
+  projectFullName: ${self:custom.project}-${self:custom.integrationName}
+  deploymentBucketName: ${env:deploymentBucketName}
+  networkStackName: ${env:networkStackName, "child-net"}
+  baseURL: ${env:baseURL}
+  basePath: ${env:basePath}
+  integrationBaseStackName: ${env:integrationBaseStackName}
+  authorizerStackName: ${env:authorizerStackName}
+  bucketMassiveAccount: ${env:bucketMassiveAccount}
+  KmsKeyIdMinmambuBackend: ${env:KmsKeyIdMinmambuBackend}
+  origURL: ${env:origURL}
+  sapBucket: ${env:sapBucket}
+  bucketCC: ${env:bucketCC}
+  
+package:
+  individually: true
+  exclude:
+    - ./**
+
+plugins:
+  - serverless-python-requirements
+  - serverless-wsgi
+
+functions:
+  sap-generate-file:
+    name: func-${self:custom.projectFullName}-${self:custom.stage}-sap-generate-file
+    description: call api mambu to generate file for SAP
+    handler: src/sap/generate_file.lambda_handler
+    role: sapGenerateFileLambdaRole
+    timeout: 30
+    environment:
+      stage: ${self:custom.stage}
+      secret_token_mambu:
+        !Ref secretTokenApiMambu
+      baseURL: ${self:custom.baseURL}
+      sapBucket: ${self:custom.sapBucket}
+    package:
+      include: 
+        - src/sap/generate_file.py
+        - "src/common/**"
+    events:
+      - http:
+          path: ${self:custom.basePath}/sap/file/generate
+          method: GET
+          cors: true
+          request:
+            parameteres:
+              querystrings:
+                - to: true
+                - from: true
+          authorizer:
+            type: CUSTOM
+            authorizerId: ${cf:${self:custom.authorizerStackName}.ApiKeyAuthorizerId}
+    vpc:
+      securityGroupIds:
+        - ${cf:${self:custom.integrationBaseStackName}.DefaultLambdaSecurityGroupId}
+      subnetIds:
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet1EC2}
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet2EC2}
+
+  upload-massive-account:
+    name: func-${self:custom.projectFullName}-${self:custom.stage}-upload-massive-account
+    handler: src/sap/upload_massive_account.lambda_handler
+    role: UploadS3FileRole
+    timeout: 15
+    environment:
+      stage: ${self:custom.stage}
+      secret_token_mambu:
+        !Ref secretTokenApiMambu
+      baseURL: ${self:custom.baseURL}
+      bucketMassiveAccount: ${self:custom.bucketMassiveAccount}
+    package:
+      include: 
+        - src/sap/upload_massive_account.py
+        - "src/common/**"
+    events:
+      - http:
+          path: ${self:custom.basePath}/massive-acount/upload
+          method: POST
+          cors: true
+          authorizer:
+            type: CUSTOM
+            authorizerId: ${cf:${self:custom.authorizerStackName}.ApiKeyAuthorizerId}
+    vpc:
+      securityGroupIds:
+        - ${cf:${self:custom.integrationBaseStackName}.DefaultLambdaSecurityGroupId}
+      subnetIds:
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet1EC2}
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet2EC2}
+
+
+  mambu-contabilidad:
+    name: func-${self:custom.projectFullName}-${self:custom.stage}-mambu-contabilidad
+    handler: src/petitions/mambu_contabilidad.handler
+    role: mambuContabilidadCrudLR
+    timeout: 30
+    environment:
+      secretApiKeyMambuContabilidad:
+        !Ref secretApiKeyMambuContabilidad
+      baseURL: ${self:custom.baseURL}
+      basePath: ${self:custom.basePath}
+      origURL: ${self:custom.origURL}
+      sapBucket: ${self:custom.sapBucket}
+      bucketCC: ${self:custom.bucketCC}
+    package:
+      include: 
+        - src/petitions/mambu_contabilidad.py
+        - "src/common/**"
+    events:
+      - http:
+          path: ${self:custom.basePath}/{proxy+}
+          method: ANY
+          cors: true
+          authorizer:
+            type: CUSTOM
+            authorizerId: ${cf:${self:custom.authorizerStackName}.ApiKeyAuthorizerId}
+    vpc:
+      securityGroupIds:
+        - ${cf:${self:custom.integrationBaseStackName}.DefaultLambdaSecurityGroupId}
+      subnetIds:
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet1EC2}
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet2EC2}
+
+
+  massive-file:
+    name: func-${self:custom.projectFullName}-${self:custom.stage}-massive-load-file
+    description: load file cdt to SNS
+    handler: src/sap/massive_load_file.lambda_handler
+    role: masiveProcessLoadRL
+    timeout: 15
+    environment:
+      stage: ${self:custom.stage}
+      snsLoadFile: !Ref SnsTopicMassiveLoadFile
+    package:
+      include: 
+        - src/sap/massive_load_file.py
+        - "src/common/**"
+    events:
+      - s3:
+          bucket: !Ref bancoS3Bucket
+          event: s3:ObjectCreated:*
+          existing: true
+          rules:
+            - suffix: .xlsx
+    vpc:
+      securityGroupIds:
+        - ${cf:${self:custom.integrationBaseStackName}.DefaultLambdaSecurityGroupId}
+      subnetIds:
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet1EC2}
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet2EC2}
+
+  send-request-mambu-creation:
+    name: func-${self:custom.projectFullName}-${self:custom.stage}-send-mambu-creation
+    description: send information for create accounts to mambu 
+    handler: src/massive_account_creation/send_request_mambu_creation.lambda_handler
+    role: SendRequestCreationMambuLR
+    timeout: 30
+    environment:
+      stage: ${self:custom.stage}
+      baseURL: ${self:custom.baseURL}
+      snsLoadFile: !Ref SnsTopicMassiveLoadFile
+      sc_token_accounts:
+        !Ref secretTokenApiMambu
+    package:
+      include: 
+        - src/massive_account_creation/send_request_mambu_creation.py
+        - "src/common/**"
+        - "src/massive_account_creation/request/**"
+    events:
+      - sns: 
+          arn: !Ref SnsTopicMassiveLoadFile
+          topicName: sns-${self:custom.projectFullName}-${self:custom.stage}-cesantias
+    vpc:
+      securityGroupIds:
+        - ${cf:${self:custom.integrationBaseStackName}.DefaultLambdaSecurityGroupId}
+      subnetIds:
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet1EC2}
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet2EC2}
+
+  main-results-mambu-creation:
+    name: func-${self:custom.projectFullName}-${self:custom.stage}-main-results-mambu-creation
+    description: API para leer la tabla de resultados de la creacion masiva de cuentas en mambu
+    handler: src/massive_account_creation/main.handler
+    role: mainResultsMambuLR
+    environment:
+      stage: ${self:custom.stage}
+    timeout: 30
+    package:
+      include: 
+        - src/massive_account_creation/main.py
+        - "src/common/**"
+        - "src/massive_account_creation/**"
+    events:
+      - http:
+          path: ${self:custom.basePath}/mambu/massiveAccounts/results
+          method: GET
+          cors: true
+          integration: lambda-proxy
+          authorizer:
+            type: CUSTOM
+            authorizerId: ${cf:${self:custom.authorizerStackName}.ApiKeyAuthorizerId}
+      - http:
+          path: ${self:custom.basePath}/mambu/massiveAccounts/results/{file_id}
+          method: GET
+          cors: true
+          integration: lambda-proxy
+          authorizer:
+            type: CUSTOM
+            authorizerId: ${cf:${self:custom.authorizerStackName}.ApiKeyAuthorizerId}
+    vpc:
+      securityGroupIds:
+        - ${cf:${self:custom.integrationBaseStackName}.DefaultLambdaSecurityGroupId}
+      subnetIds:
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet1EC2}
+        - ${cf:${self:custom.networkStackName}.PrivateSubnet2EC2}
+
+      
+        
+resources:
+  Resources:
+    sapGenerateFileLambdaRole: 
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: 'Lambda Role'
+        ManagedPolicyArns: 
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Path: /
+        Policies:
+        - PolicyName: 'read-secret-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref secretTokenApiMambu
+        - PolicyName: 'allow-kms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Encrypt'
+                  - 'kms:Decrypt'
+                Resource: 
+                  - ${self:custom.KmsKeyIdMinmambuBackend}
+        RoleName: iam-${self:custom.projectFullName}-${self:custom.stage}-sapGenerateFileLambdaRole
+        Tags: 
+          - Key: Name
+            Value: iam-${self:custom.projectFullName}-${self:custom.stage}-sapGenerateFileLambdaRole
+    
+    UploadS3FileRole:
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: 'Lambda Role'
+        ManagedPolicyArns: 
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Path: /
+        Policies:
+        - PolicyName: 's3-putObject-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                Resource: arn:aws:s3:::s3-minmambu-${self:custom.stage}-massive-accounts/*
+                Sid: 'S3PutObjects'
+        - PolicyName: dynamoDbPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !GetAtt  massiveAccountsTableResult.Arn
+        - PolicyName: 'allow-kms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Encrypt'
+                  - 'kms:Decrypt'
+                Resource: 
+                  - ${self:custom.KmsKeyIdMinmambuBackend}
+        RoleName: iam-${self:custom.projectFullName}-${self:custom.stage}-UploadS3FileRole
+        Tags: 
+          - Key: Name
+            Value: iam-${self:custom.projectFullName}-${self:custom.stage}-UploadS3FileRole
+
+    secretTokenApiMambu:
+      Type: AWS::SecretsManager::Secret
+      Properties: 
+        Description: Secreto que almacena los valores secretos para obtener token para ejecutar el api de mambu.
+        Name: scm-${self:custom.projectFullName}-${self:custom.stage}-secretTokenApiMambu
+        KmsKeyId: ${self:custom.KmsKeyIdMinmambuBackend}
+        SecretString: "{\"client_id\": \"to_change\",\"client_secret\": \"to_change\",\"resource\": \"to_change\",\"grant_type\": \"to_change\",\"token_type\": \"to_change\"}"
+        Tags: 
+          - Key: Name
+            Value: scm-${self:custom.projectFullName}-${self:custom.stage}-secretTokenApiMambu
+    
+    secretApiKeyMambuContabilidad:
+      Type: AWS::SecretsManager::Secret
+      Properties: 
+        Description: Secreto que almacena el api key de contabilidad de Mambu
+        Name: scm-${self:custom.projectFullName}-${self:custom.stage}-secretApiKeyIntegration
+        KmsKeyId: ${self:custom.KmsKeyIdMinmambuBackend}
+        SecretString: "change me"    
+        Tags: 
+          - Key: Name
+            Value: scm-${self:custom.projectFullName}-${self:custom.stage}-secretApiKeyIntegration
+
+
+    mambuContabilidadCrudLR:
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: 'Lambda Role'
+        ManagedPolicyArns: 
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Path: /
+        Policies:
+        - PolicyName: 'read-secret-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref secretApiKeyMambuContabilidad
+        - PolicyName: 'allow-kms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Encrypt'
+                  - 'kms:Decrypt'
+                Resource: 
+                  - ${self:custom.KmsKeyIdMinmambuBackend}
+        RoleName: iam-${self:custom.projectFullName}-${self:custom.stage}-mambuContabilidadCrudLR
+        Tags: 
+          - Key: Name
+            Value: iam-${self:custom.projectFullName}-${self:custom.stage}-mambuContabilidadCrudLR
+
+
+    bancoS3Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: s3-minmambu-${self:custom.stage}-massive-accounts
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: 'AES256'
+        Tags:
+          - Key: Datos
+            Value: "Sensible"
+        
+    
+    masiveProcessLoadRL:
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: 'Lambda Role'
+        ManagedPolicyArns: 
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Path: /
+        Policies:
+        - PolicyName: 'sns-publish-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'SNS:Publish'
+                Resource: !Ref SnsTopicMassiveLoadFile
+        - PolicyName: 'download-s3-file'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:GetObject'
+                Resource:
+                  - arn:aws:s3:::s3-minmambu-${self:custom.stage}-massive-accounts/*
+                  - arn:aws:s3:::s3-minmambu-${self:custom.stage}-massive-accounts/
+        - PolicyName: "update-dynamodb-table"
+          PolicyDocument: 
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:UpdateItem'
+                Resource: !GetAtt  massiveAccountsTableResult.Arn
+        - PolicyName: 'allow-kms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Encrypt'
+                  - 'kms:Decrypt'
+                Resource: 
+                  - ${self:custom.KmsKeyIdMinmambuBackend}
+        RoleName: iam-${self:custom.projectFullName}-${self:custom.stage}-masiveProcessLoadRL
+        Tags: 
+          - Key: Name
+            Value: iam-${self:custom.projectFullName}-${self:custom.stage}-masiveProcessLoadRL
+    
+    SnsTopicMassiveLoadFile:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: sns-${self:custom.projectFullName}-${self:custom.stage}-massive-file
+
+    massiveAccountsTableResult:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ddb-${self:custom.projectFullName}-${self:custom.stage}-tblResultMassiveAccounts
+        AttributeDefinitions:
+          - AttributeName: file_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: file_id
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        SSESpecification:
+          KMSMasterKeyId: ${self:custom.KmsKeyIdMinmambuBackend}
+          SSEEnabled: true
+          SSEType: KMS
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+
+    SendRequestCreationMambuLR:
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: 'Lambda Role'
+        ManagedPolicyArns: 
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Path: /
+        Policies:
+        - PolicyName: 'read-secret-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref secretTokenApiMambu
+        - PolicyName: 'sns-publish-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'SNS:Publish'
+                Resource: !Ref SnsTopicMassiveLoadFile
+        - PolicyName: "update-dynamodb-table"
+          PolicyDocument: 
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:UpdateItem'
+                Resource: !GetAtt  massiveAccountsTableResult.Arn
+        - PolicyName: 'allow-kms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'kms:Encrypt'
+                  - 'kms:Decrypt'
+                Resource: 
+                  - ${self:custom.KmsKeyIdMinmambuBackend}
+        RoleName: iam-${self:custom.projectFullName}-${self:custom.stage}-SendRequestCreationMambuLR
+        Tags: 
+          - Key: Name
+            Value: iam-${self:custom.projectFullName}-${self:custom.stage}-SendRequestCreationMambuLR
+
+    mainResultsMambuLR:
+      Type: AWS::IAM::Role
+      Properties: 
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Description: 'Lambda Role'
+        ManagedPolicyArns: 
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Path: /
+        RoleName: iam-${self:custom.projectFullName}-${self:custom.stage}-mainResultsMambuLR
+        Tags: 
+          - Key: Name
+            Value: iam-${self:custom.projectFullName}-${self:custom.stage}-mainResultsMambuLR
+        Policies:
+          - PolicyName: dynamoDbPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:PartiQLSelect
+                  Resource:
+                    - !GetAtt massiveAccountsTableResult.Arn
+          - PolicyName: 'allow-kms'
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - 'kms:Encrypt'
+                    - 'kms:Decrypt'
+                  Resource: 
+                    - ${self:custom.KmsKeyIdMinmambuBackend}
